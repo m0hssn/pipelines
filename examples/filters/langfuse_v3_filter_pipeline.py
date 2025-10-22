@@ -1,8 +1,7 @@
 """
 title: Langfuse Filter Pipeline for v3
-author: open-webui
 date: 2025-07-31
-version: 0.0.1
+version: 0.0.2
 license: MIT
 description: A filter pipeline that uses Langfuse v3.
 requirements: langfuse>=3.0.0
@@ -213,20 +212,14 @@ class Pipeline:
                     "interface": "open-webui",
                 }
                 
-                # Create trace with all necessary information
-                trace = self.langfuse.start_span(
+                # Create parent trace (not a span) - this will have parentObservationId: null
+                trace = self.langfuse.trace(
                     name=f"chat:{chat_id}",
                     input=body,
-                    metadata=trace_metadata
-                )
-
-                # Set additional trace attributes
-                trace.update_trace(
+                    metadata=trace_metadata,
                     user_id=user_email,
                     session_id=chat_id,
                     tags=tags_list if tags_list else None,
-                    input=body,
-                    metadata=trace_metadata,
                 )
 
                 self.chat_traces[chat_id] = trace
@@ -244,7 +237,7 @@ class Pipeline:
                 "session_id": chat_id,
                 "interface": "open-webui",
             }
-            trace.update_trace(
+            trace.update(
                 tags=tags_list if tags_list else None,
                 metadata=trace_metadata,
             )
@@ -253,7 +246,7 @@ class Pipeline:
         metadata["type"] = task_name
         metadata["interface"] = "open-webui"
 
-        # Log user input as event
+        # Log user input as a child span
         try:
             trace = self.chat_traces[chat_id]
             
@@ -267,7 +260,8 @@ class Pipeline:
                 "event_id": str(uuid.uuid4()),
             }
             
-            event_span = trace.start_span(
+            # Create as child span - this will automatically set parentObservationId
+            event_span = trace.span(
                 name=f"user_input:{str(uuid.uuid4())}",
                 metadata=event_metadata,
                 input=body["messages"],
@@ -308,7 +302,7 @@ class Pipeline:
             # Re-run inlet to register if somehow missing
             return await self.inlet(body, user)
 
-        self.chat_traces[chat_id]
+        trace = self.chat_traces[chat_id]
 
         assistant_message = get_last_assistant_message(body["messages"])
         assistant_message_obj = get_last_assistant_message_obj(body["messages"])
@@ -328,8 +322,6 @@ class Pipeline:
                     self.log(f"Usage data extracted: {usage}")
 
         # Update the trace with complete output information
-        trace = self.chat_traces[chat_id]
-        
         metadata["type"] = task_name
         metadata["interface"] = "open-webui"
         
@@ -343,7 +335,7 @@ class Pipeline:
         }
         
         # Update trace with output and complete metadata
-        trace.update_trace(
+        trace.update(
             output=assistant_message,
             metadata=complete_trace_metadata,
             tags=tags_list if tags_list else None,
@@ -365,11 +357,8 @@ class Pipeline:
         metadata["model_id"] = model_id
         metadata["model_name"] = model_name
 
-        # Create LLM generation for the response
+        # Create LLM generation as a child of the trace
         try:
-            trace = self.chat_traces[chat_id]
-            
-            # Create complete generation metadata
             generation_metadata = {
                 **complete_trace_metadata,
                 "type": "llm_response",
@@ -378,7 +367,8 @@ class Pipeline:
                 "generation_id": str(uuid.uuid4()),
             }
             
-            generation = trace.start_generation(
+            # Use trace.generation() to create child generation
+            generation = trace.generation(
                 name=f"llm_response:{str(uuid.uuid4())}",
                 model=model_value,
                 input=body["messages"],
