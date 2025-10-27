@@ -1,7 +1,8 @@
 """
 title: Langfuse Filter Pipeline for v3
-date: 2025-07-31
-version: 0.0.2
+author: open-webui
+date: 2025-10-27
+version: 0.0.3
 license: MIT
 description: A filter pipeline that uses Langfuse v3.
 requirements: langfuse>=3.0.0
@@ -194,6 +195,7 @@ class Pipeline:
             raise ValueError(error_message)
 
         user_email = user.get("email") if user else None
+        user_id = user.get("id") if user else None
         # Defaulting to 'user_response' if no task is provided
         task_name = metadata.get("task", "user_response")
 
@@ -204,26 +206,27 @@ class Pipeline:
             self.log(f"Creating new trace for chat_id: {chat_id}")
 
             try:
-                # Create trace using Langfuse v3 API with complete data
+                # Create trace metadata
                 trace_metadata = {
                     **metadata,
-                    "user_id": user_email,
+                    "user_id": user_id,
+                    "user_email": user_email,
                     "session_id": chat_id,
                     "interface": "open-webui",
                 }
                 
-                # Create parent trace (not a span) - this will have parentObservationId: null
+                # Create trace using Langfuse v3 API - CORRECTED
                 trace = self.langfuse.trace(
                     name=f"chat:{chat_id}",
-                    input=body,
-                    metadata=trace_metadata,
-                    user_id=user_email,
-                    session_id=chat_id,
+                    user_id=user_id,  # Set directly in trace creation
+                    session_id=chat_id,  # Set directly in trace creation
                     tags=tags_list if tags_list else None,
+                    input=body,
+                    metadata=trace_metadata
                 )
 
                 self.chat_traces[chat_id] = trace
-                self.log(f"Successfully created trace for chat_id: {chat_id}")
+                self.log(f"Successfully created trace for chat_id: {chat_id} with user: {user_email} (id: {user_id})")
             except Exception as e:
                 self.log(f"Failed to create trace: {e}")
                 return body
@@ -233,7 +236,8 @@ class Pipeline:
             # Update trace with current metadata and tags
             trace_metadata = {
                 **metadata,
-                "user_id": user_email,
+                "user_id": user_id,
+                "user_email": user_email,
                 "session_id": chat_id,
                 "interface": "open-webui",
             }
@@ -246,7 +250,7 @@ class Pipeline:
         metadata["type"] = task_name
         metadata["interface"] = "open-webui"
 
-        # Log user input as a child span
+        # Log user input as event
         try:
             trace = self.chat_traces[chat_id]
             
@@ -255,12 +259,13 @@ class Pipeline:
                 **metadata,
                 "type": "user_input",
                 "interface": "open-webui",
-                "user_id": user_email,
+                "user_id": user_id,
+                "user_email": user_email,
                 "session_id": chat_id,
                 "event_id": str(uuid.uuid4()),
             }
             
-            # Create as child span - this will automatically set parentObservationId
+            # Create span for user input (not another trace)
             event_span = trace.span(
                 name=f"user_input:{str(uuid.uuid4())}",
                 metadata=event_metadata,
@@ -302,7 +307,7 @@ class Pipeline:
             # Re-run inlet to register if somehow missing
             return await self.inlet(body, user)
 
-        trace = self.chat_traces[chat_id]
+        self.chat_traces[chat_id]
 
         assistant_message = get_last_assistant_message(body["messages"])
         assistant_message_obj = get_last_assistant_message_obj(body["messages"])
@@ -322,13 +327,19 @@ class Pipeline:
                     self.log(f"Usage data extracted: {usage}")
 
         # Update the trace with complete output information
+        trace = self.chat_traces[chat_id]
+        
+        user_email = user.get("email") if user else None
+        user_id = user.get("id") if user else None
+        
         metadata["type"] = task_name
         metadata["interface"] = "open-webui"
         
         # Create complete trace metadata with all information
         complete_trace_metadata = {
             **metadata,
-            "user_id": user.get("email") if user else None,
+            "user_id": user_id,
+            "user_email": user_email,
             "session_id": chat_id,
             "interface": "open-webui",
             "task": task_name,
@@ -357,8 +368,11 @@ class Pipeline:
         metadata["model_id"] = model_id
         metadata["model_name"] = model_name
 
-        # Create LLM generation as a child of the trace
+        # Create LLM generation for the response
         try:
+            trace = self.chat_traces[chat_id]
+            
+            # Create complete generation metadata
             generation_metadata = {
                 **complete_trace_metadata,
                 "type": "llm_response",
@@ -367,7 +381,7 @@ class Pipeline:
                 "generation_id": str(uuid.uuid4()),
             }
             
-            # Use trace.generation() to create child generation
+            # Use trace.generation() instead of trace.start_generation()
             generation = trace.generation(
                 name=f"llm_response:{str(uuid.uuid4())}",
                 model=model_value,
